@@ -2,12 +2,17 @@
 #define _INCLUDE_METAMOD_SOURCE_STUB_PLUGIN_H_
 
 #include <ISmmPlugin.h>
-#include <sh_vector.h>
 #include "utlvector.h"
 #include "ehandle.h"
-#include <iserver.h>
+#include <networkgameserverbase.h>
+#include <gamesessionconfiguration.h>
+#include <icvar.h>
+#include <inetworkserverservice.h>
+#include <ivengineserver2.h>
+#include <isource2server.h>
 #include <entity2/entitysystem.h>
 #include <steam/steam_gameserver.h>
+#include <serversideclient.h>
 #include "irecipientfilter.h"
 #include "igameevents.h"
 #include "entitysystem.h"
@@ -24,7 +29,6 @@
 #include "igameeventsystem.h"
 #include <networksystem/inetworkserializer.h>
 #include <networksystem/inetworkmessages.h>
-#include <networksystem/netmessage.h>
 #include "usermessages.pb.h"
 #include "CGameRules.h"
 #include "module.h"
@@ -42,13 +46,11 @@
 #include <array>
 #include <thread>
 #include <netmessages.h>
+#include "netmessage_types.h"
 #include <igamesystem.h>
-#include <usermessages.h>
 #include "customhud.pb.h"
 
 static constexpr int CS_UM_CustomHudClicked = 390;
-class CCSUsrMsg_CustomHudClicked_t
-    : public CUserMessagePB<CS_UM_CustomHudClicked, CCSUsrMsg_CustomHudClicked> {};
 
 class CPhysicsQuery;
 
@@ -56,9 +58,9 @@ class CRecipientFilter : public IRecipientFilter
 {
 public:
 	CRecipientFilter(NetChannelBufType_t nBufType = BUF_RELIABLE, bool bInitMessage = false) :
-		m_nBufType(nBufType), m_bInitMessage(bInitMessage) {}
+		m_nBufType(nBufType), m_nPredictedByPlayerSlot(-1), m_bInitMessage(bInitMessage) {}
 
-	CRecipientFilter(IRecipientFilter* source, int exceptSlot = -1)
+	CRecipientFilter(IRecipientFilter* source, int exceptSlot = -1) : m_nPredictedByPlayerSlot(-1)
 	{
 		m_Recipients = source->GetRecipients();
 		m_nBufType = source->GetNetworkBufType();
@@ -73,7 +75,7 @@ public:
 	NetChannelBufType_t GetNetworkBufType(void) const override { return m_nBufType; }
 	bool IsInitMessage(void) const override { return m_bInitMessage; }
 	const CPlayerBitVec& GetRecipients(void) const override { return m_Recipients; }
-	CPlayerSlot GetPredictedByPlayerSlot() const override { return m_nPredictedByPlayerSlot; }
+	CPlayerSlot GetPredictedPlayerSlot() const override { return m_nPredictedByPlayerSlot; }
 
 	void AddRecipient(int iSlot)
 	{
@@ -105,12 +107,12 @@ extern std::map<int, std::map<std::string, CommandCallback>> ChatCommands;
 class Menus final : public ISmmPlugin, public IMetamodListener, public IEntityListener
 {
 public:
+	Menus();
 	bool Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late);
 	bool Unload(char* error, size_t maxlen);
 	void AllPluginsLoaded();
 	void* OnMetamodQuery(const char* iface, int* ret);
 	void OnPluginUnload(PluginId id);
-	bool FireEvent(IGameEvent* pEvent, bool bDontBroadcast);
 	STEAM_GAMESERVER_CALLBACK_MANUAL(Menus, OnValidateAuthTicket, ValidateAuthTicketResponse_t, m_CallbackValidateAuthTicketResponse);
 private:
 	const char* GetAuthor();
@@ -123,63 +125,98 @@ private:
 	const char* GetLogTag();
 
 private:
-	void ClientCommand(CPlayerSlot slot, const CCommand &args);
-	void GameFrame(bool simulating, bool bFirstTick, bool bLastTick);
-	void StartupServer(const GameSessionConfiguration_t& config, ISource2WorldSession*, const char*);
-    void OnDispatchConCommand(ConCommandRef cmd, const CCommandContext& ctx, const CCommand& args);
-	void OnClientDisconnect( CPlayerSlot slot, ENetworkDisconnectionReason reason, const char *pszName, uint64 xuid, const char *pszNetworkID );
-	void OnGameServerSteamAPIActivated();
-	void OnPreWorldUpdate(bool simulating);
-	void OnServerHibernationUpdate(bool bHibernating);
-	void OnGameServerSteamAPIDeactivated();
-	void OnHostNameChanged(const char *pHostname);
-	void OnPreFatalShutdown() const;
-	void OnUpdateWhenNotInGame(float flFrameTime);
-	void OnServerConVarChanged(const char *pVarName, const char *pValue);
-	void OnPostEventAbstract(CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64 *clients, INetworkMessageInternal *pEvent, const CNetMessage *pData, unsigned long nSize, NetChannelBufType_t bufType);
-	bool OnSetClientListening(CPlayerSlot iReceiver, CPlayerSlot iSender, bool bListen);
+	KHook::Return<void> ClientCommand(IServerGameClients*, CPlayerSlot slot, const CCommand &args);
+	KHook::Return<void> GameFrame(IServerGameDLL*, bool simulating, bool bFirstTick, bool bLastTick);
+	KHook::Return<void> StartupServer(INetworkServerService*, const GameSessionConfiguration_t& config, ISource2WorldSession*, const char*);
+	KHook::Return<void> OnDispatchConCommand(ICvar*, ConCommandRef cmd, const CCommandContext& ctx, const CCommand& args);
+	KHook::Return<void> OnClientDisconnect(IServerGameClients*, CPlayerSlot slot, ENetworkDisconnectionReason reason, const char *pszName, uint64 xuid, const char *pszNetworkID );
+	KHook::Return<void> OnGameServerSteamAPIActivated(IServerGameDLL*);
+	KHook::Return<void> OnPreWorldUpdate(IServerGameDLL*, bool simulating);
+	KHook::Return<void> OnServerHibernationUpdate(IServerGameDLL*, bool bHibernating);
+	KHook::Return<void> OnGameServerSteamAPIDeactivated(IServerGameDLL*);
+	KHook::Return<void> OnHostNameChanged(IServerGameDLL*, const char *pHostname);
+	KHook::Return<void> OnPreFatalShutdown(const IServerGameDLL*);
+	KHook::Return<void> OnUpdateWhenNotInGame(IServerGameDLL*, float flFrameTime);
+	KHook::Return<void> OnServerConVarChanged(IServerGameDLL*, const char *pVarName, const char *pValue);
+	KHook::Return<void> OnPostEventAbstract(IGameEventSystem*, CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64 *clients, INetworkMessageInternal *pEvent, const CNetMessage *pData, unsigned long nSize, NetChannelBufType_t bufType);
+	KHook::Return<bool> OnSetClientListening(IVEngineServer2* pEngine, CPlayerSlot iReceiver, CPlayerSlot iSender, bool bListen);
 
-	void OnGameFramePost(bool simulating, bool bFirstTick, bool bLastTick);
-	void OnPreWorldUpdatePost(bool simulating);
-	void OnServerHibernationUpdatePost(bool bHibernating);
-	void OnGameServerSteamAPIActivatedPost();
-	void OnGameServerSteamAPIDeactivatedPost();
-	void OnHostNameChangedPost(const char *pHostname);
-	void OnPreFatalShutdownPost() const;
-	void OnUpdateWhenNotInGamePost(float flFrameTime);
-	void OnServerConVarChangedPost(const char *pVarName, const char *pValue);
-	void OnPostEventAbstractPost(CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64 *clients, INetworkMessageInternal *pEvent, const CNetMessage *pData, unsigned long nSize, NetChannelBufType_t bufType);
-	bool OnSetClientListeningPost(CPlayerSlot iReceiver, CPlayerSlot iSender, bool bListen);
-	void OnDispatchConCommandPost(ConCommandRef cmd, const CCommandContext& ctx, const CCommand& args);
-	bool OnFireEventPost(IGameEvent* pEvent, bool bDontBroadcast);
+	KHook::Return<void> OnGameFramePost(IServerGameDLL*, bool simulating, bool bFirstTick, bool bLastTick);
+	KHook::Return<void> OnPreWorldUpdatePost(IServerGameDLL*, bool simulating);
+	KHook::Return<void> OnServerHibernationUpdatePost(IServerGameDLL*, bool bHibernating);
+	KHook::Return<void> OnGameServerSteamAPIActivatedPost(IServerGameDLL*);
+	KHook::Return<void> OnGameServerSteamAPIDeactivatedPost(IServerGameDLL*);
+	KHook::Return<void> OnHostNameChangedPost(IServerGameDLL*, const char *pHostname);
+	KHook::Return<void> OnPreFatalShutdownPost(const IServerGameDLL*);
+	KHook::Return<void> OnUpdateWhenNotInGamePost(IServerGameDLL*, float flFrameTime);
+	KHook::Return<void> OnServerConVarChangedPost(IServerGameDLL*, const char *pVarName, const char *pValue);
+	KHook::Return<void> OnPostEventAbstractPost(IGameEventSystem*, CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64 *clients, INetworkMessageInternal *pEvent, const CNetMessage *pData, unsigned long nSize, NetChannelBufType_t bufType);
+	KHook::Return<bool> OnSetClientListeningPost(IVEngineServer2*, CPlayerSlot iReceiver, CPlayerSlot iSender, bool bListen);
+	KHook::Return<void> OnDispatchConCommandPost(ICvar*, ConCommandRef cmd, const CCommandContext& ctx, const CCommand& args);
+	KHook::Return<bool> OnFireEvent(IGameEventManager2* pManager, IGameEvent* pEvent, bool bDontBroadcast);
+	KHook::Return<bool> OnFireEventPost(IGameEventManager2*, IGameEvent* pEvent, bool bDontBroadcast);
 	void OnValidateAuthTicketHook(ValidateAuthTicketResponse_t *pResponse);
-	void OnClientConnected( CPlayerSlot slot, const char *pszName, uint64 xuid, const char *pszNetworkID, const char *pszAddress, bool bFakePlayer );
-	bool OnClientConnect( CPlayerSlot slot, const char *pszName, uint64 xuid, const char *pszNetworkID, bool unk1, CBufferString *pRejectReason );
-	void OnClientPutInServer( CPlayerSlot slot, char const *pszName, int type, uint64 xuid );
-	void OnClientActive( CPlayerSlot slot, bool bLoadGame, char const *pszName, uint64 xuid );
-	void OnClientFullyConnect( CPlayerSlot slot );
-	void OnClientSettingsChanged( CPlayerSlot slot );
-	void OnProcessUsercmds( CPlayerSlot slot, const CCLCMsg_Move_t &msg, bool paused );
-	void OnClientVoice( CPlayerSlot slot );
-	void OnClientCommandKeyValues( CPlayerSlot slot, KeyValues *pKeyValues );
-	bool OnProcessClientVoiceData( CPlayerSlot slot, void *pVoiceInfo );
-	void OnCheckTransmit(CCheckTransmitInfo **pInfoInfoList, int nInfoCount, CBitVec<16384> &unionTransmitEdicts, CBitVec<16384> &, const Entity2Networkable_t **pNetworkables, const uint16 *pEntityIndicies, int nEntityIndices, bool bEnablePVSBits);
-	void OnClientSvcUserMessage( CPlayerSlot slot, int um_type, uint32 size, const void *buf );
-	bool Hook_OnTakeDamage_Alive(CTakeDamageInfoContainer *pInfoContainer);
+	KHook::Return<void> OnClientConnected(IServerGameClients*, CPlayerSlot slot, const char *pszName, uint64 xuid, const char *pszNetworkID, const char *pszAddress, bool bFakePlayer );
+	KHook::Return<bool> OnClientConnect(IServerGameClients*, CPlayerSlot slot, const char *pszName, uint64 xuid, const char *pszNetworkID, bool unk1, CBufferString *pRejectReason );
+	KHook::Return<void> OnClientPutInServer(IServerGameClients*, CPlayerSlot slot, char const *pszName, int type, uint64 xuid );
+	KHook::Return<void> OnClientActive(IServerGameClients*, CPlayerSlot slot, bool bLoadGame, char const *pszName, uint64 xuid );
+	KHook::Return<void> OnClientFullyConnect(IServerGameClients*, CPlayerSlot slot );
+	KHook::Return<void> OnClientSettingsChanged(IServerGameClients*, CPlayerSlot slot );
+	KHook::Return<void> OnProcessUsercmds(IServerGameClients*, CPlayerSlot slot, const CNetMessagePB<CCLCMsg_Move> &msg, bool paused );
+	KHook::Return<void> OnClientVoice(IServerGameClients*, CPlayerSlot slot );
+	KHook::Return<void> OnClientCommandKeyValues(IServerGameClients*, CPlayerSlot slot, KeyValues *pKeyValues );
+	KHook::Return<void> OnCheckTransmit(ISource2GameEntities*, CCheckTransmitInfo **pInfoInfoList, int nInfoCount, CBitVec<16384> &unionTransmitEdicts, CBitVec<16384> &, const Entity2Networkable_t **pNetworkables, const uint16 *pEntityIndicies, int nEntityIndices);
+	KHook::Return<void> OnClientSvcUserMessage(IServerGameClients*, CPlayerSlot slot, int um_type, uint32 size, const void *buf );
+	KHook::Return<bool> Hook_OnTakeDamage_Alive(CCSPlayerPawn* pPawn, CTakeDamageInfoContainer *pInfoContainer);
 
-	void OnServerSideClientClientConnect(int socket, const char* pszName, int nUserID, INetChannel* pNetChannel, uint8 nConnectionTypeFlags, uint32 uChallengeNumber);
-	void OnCServerSideClientlientPerformDisconnection(ENetworkDisconnectionReason reason);
-	bool OnProcessTick(const CNETMsg_Tick_t& msg);
-	bool OnProcessStringCmd(const CNETMsg_StringCmd_t& msg);
+	KHook::Return<void> OnServerSideClientClientConnect(CServerSideClient* pClient, int socket, const char* pszName, CPlayerUserId nUserID, INetChannel* pNetChannel, uint8 nConnectionTypeFlags, uint32 uChallengeNumber);
+	KHook::Return<void> OnCServerSideClientlientPerformDisconnection(CServerSideClient* pClient, ENetworkDisconnectionReason reason);
+	KHook::Return<bool> OnProcessTick(CServerSideClient* pClient, const CNETMsg_Tick_t& msg);
+	KHook::Return<bool> OnProcessStringCmd(CServerSideClient* pClient, const CNETMsg_StringCmd_t& msg);
 
 	void OnEntityCreated(CEntityInstance* pEntity) override;
 	void OnEntitySpawned(CEntityInstance* pEntity) override;
 	void OnEntityDeleted(CEntityInstance* pEntity) override;
 	void OnEntityParentChanged(CEntityInstance* pEntity, CEntityInstance* pNewParent) override;
 
-	void OnBuildGameSessionManifest(const EventBuildGameSessionManifest_t& msg);
+	KHook::Return<void> OnBuildGameSessionManifest(IGameSystem*, const EventBuildGameSessionManifest_t* pMsg);
 
 	std::stack<IGameEvent*> m_EventCopies;
+
+	KHook::Virtual<ICvar, void, ConCommandRef, const CCommandContext&, const CCommand&> m_DispatchConCommand;
+	KHook::Virtual<IServerGameDLL, void, bool, bool, bool> m_GameFrame;
+	KHook::Virtual<IServerGameDLL, void, bool, bool, bool> m_GameFramePost;
+	KHook::Virtual<IServerGameDLL, void> m_GameServerSteamAPIActivated;
+	KHook::Virtual<IServerGameDLL, void, bool> m_PreWorldUpdate;
+	KHook::Virtual<IServerGameDLL, void, bool> m_ServerHibernationUpdate;
+	KHook::Virtual<IServerGameDLL, void> m_GameServerSteamAPIDeactivated;
+	KHook::Virtual<IServerGameDLL, void, const char*> m_HostNameChanged;
+	KHook::Virtual<IServerGameDLL, void> m_PreFatalShutdown;
+	KHook::Virtual<IServerGameDLL, void, float> m_UpdateWhenNotInGame;
+	KHook::Virtual<IServerGameDLL, void, const char*, const char*> m_ServerConVarChanged;
+	KHook::Virtual<IGameEventSystem, void, CSplitScreenSlot, bool, int, const uint64*, INetworkMessageInternal*, const CNetMessage*, unsigned long, NetChannelBufType_t> m_PostEventAbstract;
+	KHook::Virtual<IVEngineServer2, bool, CPlayerSlot, CPlayerSlot, bool> m_SetClientListening;
+	KHook::Virtual<INetworkServerService, void, const GameSessionConfiguration_t&, ISource2WorldSession*, const char*> m_StartupServer;
+	KHook::Virtual<ISource2GameEntities, void, CCheckTransmitInfo**, int, CBitVec<16384>&, CBitVec<16384>&, const Entity2Networkable_t**, const uint16*, int> m_CheckTransmit;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot, const CCommand&> m_ClientCommand;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot, ENetworkDisconnectionReason, const char*, uint64, const char*> m_ClientDisconnect;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot, char const*, int, uint64> m_ClientPutInServer;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot, const char*, uint64, const char*, const char*, bool> m_OnClientConnected;
+	KHook::Virtual<IServerGameClients, bool, CPlayerSlot, const char*, uint64, const char*, bool, CBufferString*> m_ClientConnect;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot, int, uint32, const void*> m_ClientSvcUserMessage;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot, bool, char const*, uint64> m_ClientActive;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot> m_ClientFullyConnect;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot> m_ClientSettingsChanged;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot, const CNetMessagePB<CCLCMsg_Move>&, bool> m_ProcessUsercmds;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot> m_ClientVoice;
+	KHook::Virtual<IServerGameClients, void, CPlayerSlot, KeyValues*> m_ClientCommandKeyValues;
+	KHook::Virtual<IGameEventManager2, bool, IGameEvent*, bool> m_FireEvent;
+	KHook::Virtual<CCSPlayerPawn, bool, CTakeDamageInfoContainer*> m_OnTakeDamageAlive;
+	KHook::Virtual<CServerSideClient, void, int, const char*, CPlayerUserId, INetChannel*, uint8, uint32> m_ServerSideClientConnect;
+	KHook::Virtual<CServerSideClient, void, ENetworkDisconnectionReason> m_PerformDisconnection;
+	KHook::Virtual<CServerSideClient, bool, const CNETMsg_Tick_t&> m_ProcessTick;
+	KHook::Virtual<CServerSideClient, bool, const CNETMsg_StringCmd_t&> m_ProcessStringCmd;
+	KHook::Virtual<IGameSystem, void, const EventBuildGameSessionManifest_t*> m_BuildGameSessionManifest;
 };
 
 class MenusApi : public IMenusApi {

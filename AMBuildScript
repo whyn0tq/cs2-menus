@@ -252,8 +252,9 @@ class MMSPluginConfig(object):
 
     cxx.cxxincludes += [
       os.path.join(context.currentSourcePath),
-      os.path.join(mms_core_path),	
-      os.path.join(mms_core_path, 'sourcehook'),
+      os.path.join(mms_core_path),
+      os.path.join(self.mms_root, 'third_party', 'khook', 'include'),
+      os.path.join(sdk['path'], 'public', 'tier1'),
     ]
 
     defines = []
@@ -263,12 +264,11 @@ class MMSPluginConfig(object):
     cxx.defines += ['META_IS_SOURCE2']
     binary.sources += [
       os.path.join(sdk['path'], 'public', 'tier0', 'memoverride.cpp'),
-      os.path.join(sdk['path'], 'tier1', 'generichash.cpp'),
       os.path.join(sdk['path'], 'entity2', 'entitysystem.cpp'),
       os.path.join(sdk['path'], 'entity2', 'entityidentity.cpp'),
       os.path.join(sdk['path'], 'entity2', 'entitykeyvalues.cpp'),
-      os.path.join(sdk['path'], 'tier1', 'convar.cpp'),
-      os.path.join(sdk['path'], 'tier1', 'keyvalues3.cpp'),
+      os.path.join(sdk['path'], 'tier0_perproject', 'convar.cpp'),
+      os.path.join(sdk['path'], 'tier0_perproject', 'keyvalues3.cpp'),
     ]
 
     SdkHelpers.configureCxx(context, binary, sdk)
