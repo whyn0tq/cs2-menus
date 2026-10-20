@@ -40,10 +40,6 @@ jobs:
 
       - name: Set up dependencies
         run: |
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qy
-          apt-get install -y zip
-
           mkdir -p external
           cd external
           git clone --recursive --depth 1 --branch $MMS_VERSION \
@@ -65,7 +61,7 @@ jobs:
       - name: Package addon into ZIP
         run: |
           cd build/package/addons
-          zip -r "${{ github.event.repository.name }}.zip" .
+          python3 -m zipfile -c "${{ github.event.repository.name }}.zip" *
           mv "${{ github.event.repository.name }}.zip" "${GITHUB_WORKSPACE}/"
 
       - name: Upload build artifact
