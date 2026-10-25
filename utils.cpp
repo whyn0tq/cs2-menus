@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "utils.h"
 #include "menus_internal.h"
+#include "plugin_autoload.h"
 #include "metamod_oslink.h"
 #include "schemasystem/schemasystem.h"
 #include <serversideclient.h>
@@ -78,6 +79,8 @@ KeyValues* g_hKVData;
 
 int g_iMenuType[64];
 int g_iMenuItem[64];
+int g_iForcedMenuType[64];
+int g_iPendingForcedType = -1;
 std::chrono::milliseconds g_iMenuLastButtonInput[64];
 MenuPlayer g_MenuPlayer[64];
 std::string g_TextMenuPlayer[64];
@@ -119,6 +122,10 @@ bool g_bNotifyDisabledDefault;
 bool g_bNotifyDisabled[64];
 
 std::string g_szSettingsCommand;
+std::string g_szAutoloadDir = "addons/plugins";
+std::string g_szPluginsRestartCmd = "quit";
+int g_iSettingsMenuType;
+int g_iMenuChangeMenuType;
 
 std::map<std::string, std::string> g_mapSounds;
 std::unordered_map<std::string, CHandle<CCSCustomHudLayout>> g_mapHudLayouts[64];
@@ -179,6 +186,7 @@ void (*UTIL_AcceptInput)(CEntityInstance* pThis, const char* pInputName, CEntity
 bool (*UTIL_TraceShape)(CPhysicsQuery*, const Ray_t* ray, const Vector* start, const Vector* end, CTraceFilter* filter, trace_t* trace) = nullptr;
 void (*UTIL_TerminateRound)(CGameRules* pGameRules, float delay, unsigned int reason, int64 teamid) = nullptr;
 AcquireResult::Type (*UTIL_CanAcquire)(CPlayer_ItemServices* pItemServices, CEconItemView* pItemView, AcquireMethod::Type eMethod, uint* pLimit) = nullptr;
+void* (*UTIL_ProcessUsercmds)(CCSPlayerController* pController, void *cmds, int numcmds, bool paused, float margin) = nullptr;
 
 using namespace DynLibUtils;
 
@@ -187,6 +195,7 @@ funchook_t* m_SayTeamHook;
 funchook_t* m_TakeDamageHook;
 funchook_t* m_IsHearingClientHook;
 funchook_t* m_CanAcquireHook;
+funchook_t* m_ProcessUsercmdsHook;
 
 std::vector<std::string> SplitStringBySpace(const std::string& input);
 bool containsOnlyDigits(const std::string& str) {
@@ -307,7 +316,7 @@ int CheckActionMenu(int iSlot, CCSPlayerController* pController, int iButton)
 		{
 			hMenuPlayer.iList = 0;
 			hMenuPlayer.bEnabled = false;
-			if(g_iMenuType[iSlot] == 0)
+			if(UTIL_EffectiveMenuType(iSlot) == 0)
 			{
 				for (size_t i = 0; i < 8; i++)
 				{
@@ -316,6 +325,7 @@ int CheckActionMenu(int iSlot, CCSPlayerController* pController, int iButton)
 			}
 			if(hMenu.hFunc) hMenu.hFunc("exit", "exit", 9, iSlot);
 			hMenuPlayer.hMenu.clear();
+			g_iForcedMenuType[iSlot] = -1;
 		}
 		else if(iButton == 8)
 		{
@@ -357,6 +367,22 @@ int CheckActionMenu(int iSlot, CCSPlayerController* pController, int iButton)
 bool FASTCALL IsHearingClient(void* serverClient, int index)
 {
 	return g_pUtilsApi->SendHookOnHearingClient(index)?UTIL_IsHearingClient(serverClient, index):false;
+}
+
+void* ProcessUsercmdsHook(CCSPlayerController* pController, void *cmds, int numcmds, bool paused, float margin)
+{
+	if(!pController || !g_pUtilsApi->HasProcessUsercmdsHooks())
+		return UTIL_ProcessUsercmds(pController, cmds, numcmds, paused, margin);
+	int iSlot = pController->GetPlayerSlot();
+	if(iSlot < 0 || iSlot >= 64)
+		return UTIL_ProcessUsercmds(pController, cmds, numcmds, paused, margin);
+
+	if(!g_pUtilsApi->SendProcessUsercmdsPre(iSlot, pController, cmds, numcmds, paused, margin))
+		return nullptr;
+
+	void* pResult = UTIL_ProcessUsercmds(pController, cmds, numcmds, paused, margin);
+	g_pUtilsApi->SendProcessUsercmdsPost(iSlot, pController, cmds, numcmds, paused, margin);
+	return pResult;
 }
 
 AcquireResult::Type CanAcquireHook(CPlayer_ItemServices* pItemServices, CEconItemView* pItemView, AcquireMethod::Type eMethod, uint* pLimit)
@@ -439,6 +465,13 @@ int UTIL_SanitizeMenuType(int iType)
 	return iType;
 }
 
+int UTIL_EffectiveMenuType(int iSlot)
+{
+	if(iSlot < 0 || iSlot >= 64) return g_iMenuTypeDefault;
+	if(g_iForcedMenuType[iSlot] >= 0) return UTIL_SanitizeMenuType(g_iForcedMenuType[iSlot]);
+	return g_iMenuType[iSlot];
+}
+
 int GetClientCookieMenuType(int iSlot)
 {
 	if(g_pPlayersApi->IsFakeClient(iSlot)) return g_iMenuTypeDefault;
@@ -497,6 +530,7 @@ void SettingMenu(int iSlot)
 			SettingMenu(iSlot);
 		}
 	});
+	g_iPendingForcedType = g_iMenuChangeMenuType;
 	g_pMenusCore->DisplayPlayerMenu(hMenu, iSlot, true, true);
 }
 
@@ -536,6 +570,7 @@ void UtilsApi::OpenSettingsMenu(int iSlot)
 		}
 		g_pUtilsApi->SendHookOnSettingsItem(szBack, szFront, iItem, iSlot);
 	});
+	g_iPendingForcedType = g_iSettingsMenuType;
 	g_pMenusCore->DisplayPlayerMenu(hMenu, iSlot, true, true);
 }
 
@@ -572,6 +607,12 @@ KHook::Return<void> Menus::OnCheckTransmit(ISource2GameEntities*, CCheckTransmit
 static std::string FindHudLayout(int iSlot, CEntityInstance* pLayout)
 {
 	if (!pLayout)
+		return "";
+
+	// pLayout приходит из входящего protobuf (индекс entity от клиента),
+	// поэтому сверяем класс, прежде чем трактовать его как HUD-лейаут.
+	const char* szClass = pLayout->GetClassname();
+	if (!szClass || strcmp(szClass, "custom_hud_layout") != 0)
 		return "";
 
 	for (auto& [name, hndl] : g_mapHudLayouts[iSlot])
@@ -619,6 +660,29 @@ void Menus::OnEntitySpawned(CEntityInstance* pEntity)
 
 void Menus::OnEntityDeleted(CEntityInstance* pEntity)
 {
+	// Убираем хэндлы удаляемого custom_hud_layout из кэшей, чтобы после
+	// переиспользования entity-слота мы не обратились к чужому entity как
+	// к HUD-лейауту (иначе краш в CUtlVector-полях схемы).
+	if(pEntity)
+	{
+		const char* szClass = pEntity->GetClassname();
+		if(szClass && strcmp(szClass, "custom_hud_layout") == 0)
+		{
+			for(int i = 0; i < 64; i++)
+			{
+				for(auto it = g_mapHudLayouts[i].begin(); it != g_mapHudLayouts[i].end(); )
+				{
+					if(it->second.Get() == pEntity) it = g_mapHudLayouts[i].erase(it);
+					else ++it;
+				}
+			}
+			for(auto it = g_mapGlobalHudLayouts.begin(); it != g_mapGlobalHudLayouts.end(); )
+			{
+				if(it->second.Get() == pEntity) it = g_mapGlobalHudLayouts.erase(it);
+				else ++it;
+			}
+		}
+	}
 	g_pUtilsApi->SendEntityDeleted(pEntity);
 }
 
@@ -723,8 +787,12 @@ bool Menus::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool la
 		g_iSoundType = g_kvCore->GetInt("sound_type", 0);
 		g_szServerID = g_kvCore->GetString("server_id", "0");
 		g_szSettingsCommand = g_kvCore->GetString("SettingsCommand", "!settings");
+		g_szAutoloadDir = g_kvCore->GetString("PluginsDir", "addons/plugins");
+		g_szPluginsRestartCmd = g_kvCore->GetString("PluginsRestartCmd", "quit");
 		g_bAllowDisableNotify = g_kvCore->GetBool("AllowDisableNotify", true);
 		g_bNotifyDisabledDefault = g_kvCore->GetBool("NotifyDisabledDefault", false);
+		g_iSettingsMenuType = g_kvCore->GetInt("SettingsMenuType", -1);
+		g_iMenuChangeMenuType = g_kvCore->GetInt("MenuChangeMenuType", -1);
 
 		g_mapSounds.clear();
 		const char* szBackSound = g_kvCore->GetString("sound_back", "");
@@ -1057,6 +1125,21 @@ bool Menus::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool la
 		}
 	}
 
+	const char* pszProcessUsercmds = g_kvSigs->GetString("ProcessUsercmds");
+	if(pszProcessUsercmds && pszProcessUsercmds[0]) {
+		UTIL_ProcessUsercmds = libserver.FindPattern(pszProcessUsercmds).RCast< decltype(UTIL_ProcessUsercmds) >();
+		if (!UTIL_ProcessUsercmds)
+		{
+			g_pUtilsApi->ErrorLog("[%s] Failed to find function to get ProcessUsercmds", g_PLAPI->GetLogTag());
+		}
+		else
+		{
+			m_ProcessUsercmdsHook = funchook_create();
+			funchook_prepare(m_ProcessUsercmdsHook, (void**)&UTIL_ProcessUsercmds, (void*)ProcessUsercmdsHook);
+			funchook_install(m_ProcessUsercmdsHook, 0);
+		}
+	}
+
 	new CTimer(1.0f, []()
 	{
 		for(int i = 0; i < 64; i++)
@@ -1075,41 +1158,47 @@ bool Menus::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool la
 	});
 
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_1"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 1)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 1)) return true;
 		return false;
 	});
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_2"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 2)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 2)) return true;
 		return false;
 	});
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_3"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 3)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 3)) return true;
 		return false;
 	});
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_4"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 4)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 4)) return true;
 		return false;
 	});
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_5"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 5)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 5)) return true;
 		return false;
 	});
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_6"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 6)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 6)) return true;
 		return false;
 	});
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_7"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 7)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 7)) return true;
 		return false;
 	});
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_8"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 8)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 8)) return true;
 		return false;
 	});
 	g_pUtilsApi->RegCommand(g_PLID, {"mm_9"}, {}, [](int iSlot, const char* szContent){
-		if(g_iMenuType[iSlot] < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 9)) return true;
+		if(UTIL_EffectiveMenuType(iSlot) < 2) if(CheckActionMenu(iSlot, CCSPlayerController::FromSlot(iSlot), 9)) return true;
 		return false;
 	});
+
+	if (Autoload_SyncVDF(g_szAutoloadDir.c_str(), {"utils"}) > 0 && !g_szPluginsRestartCmd.empty())
+	{
+		ConColorMsg(Color(255, 165, 0, 255), "[utils] Plugins: .vdf files changed, restarting server (%s)\n", g_szPluginsRestartCmd.c_str());
+		engine->ServerCommand((g_szPluginsRestartCmd + "\n").c_str());
+	}
 
 	return true;
 }
@@ -1221,6 +1310,7 @@ bool Menus::Unload(char *error, size_t maxlen)
 	if(m_SayTeamHook) funchook_destroy(m_SayTeamHook);
 	if(m_TakeDamageHook) funchook_destroy(m_TakeDamageHook);
 	if(m_CanAcquireHook) funchook_destroy(m_CanAcquireHook);
+	if(m_ProcessUsercmdsHook) { funchook_uninstall(m_ProcessUsercmdsHook, 0); funchook_destroy(m_ProcessUsercmdsHook); }
 
 	ConVar_Unregister();
 	
@@ -1645,10 +1735,10 @@ KHook::Return<void> Menus::OnDispatchConCommand(ICvar*, ConCommandRef cmdHandle,
 			auto tokens = SplitStringBySpace(message);
 			if (!tokens.empty())
 			{
-				if (containsOnlyDigits(tokens[0]))
-				{
-					if (g_iMenuType[iSlot] < 2)
+					if (containsOnlyDigits(tokens[0]))
 					{
+						if (UTIL_EffectiveMenuType(iSlot) < 2)
+						{
 						int iButton = atoi(tokens[0].c_str());
 						if (CheckActionMenu(iSlot, pController, iButton))
 							return { KHook::Action::Supersede };
@@ -1775,7 +1865,7 @@ const char* Menus::GetLicense()
 
 const char* Menus::GetVersion()
 {
-	return "1.9.1";
+	return "1.9.2";
 }
 
 const char* Menus::GetDate()
