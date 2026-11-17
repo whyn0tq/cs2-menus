@@ -1,5 +1,9 @@
 #include "utils.h"
+#include "menu_callback.h"
 #include "menus_internal.h"
+
+static uint64_t g_MenuGeneration[64];
+static int g_MenuOwner[64];
 
 bool MenusApi::IsMenuOpen(int iSlot) {
 	return g_MenuPlayer[iSlot].bEnabled;
@@ -91,7 +95,7 @@ std::string GetMenuText(int iSlot)
 						hMenuPlayer.iList--;
 						hMenuPlayer.iEnd = std::time(0) + g_iMenuTime;
 					}
-					else if(hMenu.hFunc) hMenu.hFunc("back", "back", 7, iSlot);
+					else if(hMenu.hFunc) InvokeMenu(hMenu.hFunc, "back", "back", 7, iSlot);
 					if(g_mapSounds.find("back") != g_mapSounds.end()) {
 						const char* szSound = g_mapSounds["back"].c_str();
 						if(g_iSoundType == 1) g_pPlayersApi->EmitSound(iSlot, pPawn->entindex(), szSound, 100, 1.0f);
@@ -106,7 +110,7 @@ std::string GetMenuText(int iSlot)
 					g_iMenuItem[iSlot] = 1;
 					hMenuPlayer.iList++;
 					hMenuPlayer.iEnd = std::time(0) + g_iMenuTime;
-					if(hMenu.hFunc) hMenu.hFunc("next", "next", 8, iSlot);
+					if(hMenu.hFunc) InvokeMenu(hMenu.hFunc, "next", "next", 8, iSlot);
 					if(g_mapSounds.find("next") != g_mapSounds.end()) {
 						const char* szSound = g_mapSounds["next"].c_str();
 						if(g_iSoundType == 1) g_pPlayersApi->EmitSound(iSlot, pPawn->entindex(), szSound, 100, 1.0f);
@@ -120,7 +124,7 @@ std::string GetMenuText(int iSlot)
 				int iItem = hMenuPlayer.iList*5+iButton-1;
 				if(iItems > iItem && hMenu.hItems[iItem].iType == 1)
 				{
-					if(hMenu.hFunc) hMenu.hFunc(hMenu.hItems[iItem].sBack.c_str(), hMenu.hItems[iItem].sText.c_str(), iButton, iSlot);
+					if(hMenu.hFunc) InvokeMenu(hMenu.hFunc, hMenu.hItems[iItem].sBack.c_str(), hMenu.hItems[iItem].sText.c_str(), iButton, iSlot);
 					
 					if(g_mapSounds.find("select") != g_mapSounds.end()) {
 						const char* szSound = g_mapSounds["select"].c_str();
@@ -421,6 +425,7 @@ void UTIL_ResetPlayerSlot(int iSlot)
 	}
 
 	g_MenuPlayer[iSlot].clear();
+	g_MenuOwner[iSlot] = 0;
 	g_TextMenuPlayer[iSlot].clear();
 	g_szMenuDesc[iSlot].clear();
 	g_vItemExtra[iSlot].clear();
@@ -510,7 +515,7 @@ void UTIL_HandleLayoutClick(int iSlot, const char* szLayoutName, const char* szB
 
 	if(strcmp(szButton, "utils-closeBtn") == 0)
 	{
-		if(hMenu.hFunc && hMenu.bExit) hMenu.hFunc("exit", "exit", 9, iSlot);
+		if(hMenu.hFunc && hMenu.bExit) InvokeMenu(hMenu.hFunc, "exit", "exit", 9, iSlot);
 		UTIL_CloseLayout(iSlot, 0.2f);
 		hMenuPlayer.clear();
 		g_iForcedMenuType[iSlot] = -1;
@@ -520,7 +525,7 @@ void UTIL_HandleLayoutClick(int iSlot, const char* szLayoutName, const char* szB
 
 	if(strcmp(szButton, "utils-back") == 0)
 	{
-		if(hMenu.bBack && hMenu.hFunc) hMenu.hFunc("back", "back", 7, iSlot);
+		if(hMenu.bBack && hMenu.hFunc) InvokeMenu(hMenu.hFunc, "back", "back", 7, iSlot);
 		return;
 	}
 
@@ -540,7 +545,7 @@ void UTIL_HandleLayoutClick(int iSlot, const char* szLayoutName, const char* szB
 		{
 			hMenuPlayer.iList++;
 			UTIL_RenderLayoutContent(iSlot, hMenu, hMenuPlayer);
-			if(hMenu.hFunc) hMenu.hFunc("next", "next", 8, iSlot);
+			if(hMenu.hFunc) InvokeMenu(hMenu.hFunc, "next", "next", 8, iSlot);
 		}
 		return;
 	}
@@ -600,9 +605,29 @@ void UTIL_HandleLayoutClick(int iSlot, const char* szLayoutName, const char* szB
 		else
 		{
 			if(item.iType == 1 && hMenu.hFunc)
-				hMenu.hFunc(item.sBack.c_str(), item.sText.c_str(), iVis + 1, iSlot);
+				InvokeMenu(hMenu.hFunc, item.sBack.c_str(), item.sText.c_str(), iVis + 1, iSlot);
 		}
 		return;
+	}
+}
+
+void MenusApi::DisplayMenu(int owner, Menu& menu, int slot)
+{
+	if (owner <= 0 || slot < 0 || slot >= 64)
+		return;
+
+	Display(menu, slot, true, true, owner);
+}
+
+void MenusApi::CloseMenus(int owner)
+{
+	if (owner <= 0)
+		return;
+
+	for (int slot = 0; slot < 64; ++slot)
+	{
+		if (g_MenuOwner[slot] == owner)
+			ClosePlayerMenu(slot);
 	}
 }
 
@@ -613,6 +638,11 @@ void MenusApi::DisplayPlayerMenu(Menu& hMenu, int iSlot, bool bClose = true)
 }
 
 void MenusApi::DisplayPlayerMenu(Menu& hMenu, int iSlot, bool bClose = true, bool bReset = true)
+{
+	Display(hMenu, iSlot, bClose, bReset, 0);
+}
+
+void MenusApi::Display(Menu& hMenu, int iSlot, bool bClose, bool bReset, int owner)
 {
 	if(iSlot < 0 || iSlot >= 64) return;
 	
@@ -626,6 +656,7 @@ void MenusApi::DisplayPlayerMenu(Menu& hMenu, int iSlot, bool bClose = true, boo
 		g_iMenuItem[iSlot] = 1;
 		hMenuPlayer.bEnabled = true;
 		hMenuPlayer.hMenu = hMenu;
+		g_MenuOwner[iSlot] = owner;
 		// Применяем одноразовый форс-тип (для статических системных меню).
 		g_iForcedMenuType[iSlot] = g_iPendingForcedType;
 		g_iPendingForcedType = -1;
@@ -647,8 +678,10 @@ void MenusApi::DisplayPlayerMenu(Menu& hMenu, int iSlot, bool bClose = true, boo
 				hMenuPlayer.iList--;
 			}
 		}
-		new CTimer(0.0f,[iSlot, &hMenu, &hMenuPlayer]() {
-			if(!hMenuPlayer.bEnabled) return -1.0f;
+		const auto generation = ++g_MenuGeneration[iSlot];
+		new CTimer(0.0f, [iSlot, generation]() {
+			auto& hMenuPlayer = g_MenuPlayer[iSlot];
+			if (!hMenuPlayer.bEnabled || g_MenuGeneration[iSlot] != generation) return -1.0f;
 			if(std::time(0) >= hMenuPlayer.iEnd)
 			{
 				int iType = UTIL_EffectiveMenuType(iSlot);
@@ -665,6 +698,8 @@ void MenusApi::DisplayPlayerMenu(Menu& hMenu, int iSlot, bool bClose = true, boo
 			}
 			if(UTIL_EffectiveMenuType(iSlot) == 2) {
 				std::string szMenu = GetMenuText(iSlot);
+				if (!hMenuPlayer.bEnabled || g_MenuGeneration[iSlot] != generation)
+					return -1.0f;
 				if(szMenu.size() > 0) g_pUtilsCore->PrintToCenterHtml(iSlot, 0.0f, szMenu.c_str());
 				else {
 					hMenuPlayer.clear();
@@ -690,7 +725,7 @@ void MenusApi::DisplayPlayerMenu(Menu& hMenu, int iSlot, bool bClose = true, boo
 		int iCount = 0;
 		int iItems = size(hMenu.hItems) / 5;
 		if (size(hMenu.hItems) % 5 > 0) iItems++;
-		g_pUtilsCore->PrintToChat(iSlot, hMenu.szTitle.c_str());
+		g_pUtilsCore->PrintToChat(iSlot, "%s", hMenu.szTitle.c_str());
 		for (size_t l = hMenuPlayer.iList*5; l < hMenu.hItems.size(); ++l) {
 			switch (hMenu.hItems[l].iType)
 			{
@@ -711,7 +746,7 @@ void MenusApi::DisplayPlayerMenu(Menu& hMenu, int iSlot, bool bClose = true, boo
 
 					const char* colorCode = (hMenu.hItems[l].iType == 1) ? "\x04" : "\x08";
 					g_SMAPI->Format(sBuff, sizeof(sBuff), " %s[!%i]\x01 %s", colorCode, iCount + 1, cleanText.c_str());
-					g_pUtilsCore->PrintToChat(iSlot, sBuff);
+					g_pUtilsCore->PrintToChat(iSlot, "%s", sBuff);
 					break;
 				}
 			}
@@ -727,9 +762,9 @@ void MenusApi::DisplayPlayerMenu(Menu& hMenu, int iSlot, bool bClose = true, boo
 						g_pUtilsCore->PrintToChat(iSlot, " \x08-\x01");
 					}
 				}
-				if(hMenuPlayer.iList > 0 || hMenu.bBack) g_pUtilsCore->PrintToChat(iSlot, g_vecPhrases[std::string("Back")].c_str());
-				if(iItems > hMenuPlayer.iList+1) g_pUtilsCore->PrintToChat(iSlot, g_vecPhrases[std::string("Next")].c_str());
-				g_pUtilsCore->PrintToChat(iSlot, g_vecPhrases[std::string("Exit")].c_str());
+				if(hMenuPlayer.iList > 0 || hMenu.bBack) g_pUtilsCore->PrintToChat(iSlot, "%s", g_vecPhrases[std::string("Back")].c_str());
+				if(iItems > hMenuPlayer.iList+1) g_pUtilsCore->PrintToChat(iSlot, "%s", g_vecPhrases[std::string("Next")].c_str());
+				g_pUtilsCore->PrintToChat(iSlot, "%s", g_vecPhrases[std::string("Exit")].c_str());
 				break;
 			}
 		}
@@ -894,11 +929,13 @@ void MenusApi::ClosePlayerMenu(int iSlot)
 {
 	if(iSlot < 0 || iSlot >= 64) return;
 	int iType = UTIL_EffectiveMenuType(iSlot);
-	if(iType == 3) UTIL_CloseLayout(iSlot, 0.2f);
-	if(iType >= 2 && g_bStopingUser) {
+	if(g_MenuPlayer[iSlot].bEnabled && iType == 3) UTIL_CloseLayout(iSlot, 0.2f);
+	if(g_MenuPlayer[iSlot].bEnabled && iType >= 2 && g_bStopingUser) {
 		g_pPlayersApi->SetMoveType(iSlot, MOVETYPE_WALK);
 	}
 	g_MenuPlayer[iSlot].clear();
+	g_MenuOwner[iSlot] = 0;
+	g_vItemExtra[iSlot].clear();
 	g_iForcedMenuType[iSlot] = -1;
 	g_TextMenuPlayer[iSlot] = "";
 	g_iMenuItem[iSlot] = 1;

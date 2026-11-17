@@ -29,6 +29,8 @@ for sdk_target in MMSPlugin.sdk_targets:
     binary.compiler.postlink += [
       os.path.join(builder.sourcePath, 'funchook', 'lib', 'libfunchook.a'),
       os.path.join(builder.sourcePath, 'funchook', 'lib', 'libdistorm.a'),
+      '-L' + os.path.join(sdk['path'], 'lib', 'linux64'),
+      '-lsteam_api',
     ]
   elif binary.compiler.target.platform == 'windows':
     binary.compiler.postlink += [

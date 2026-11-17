@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "utils.h"
+#include "menu_callback.h"
 #include "menus_internal.h"
 #include "plugin_autoload.h"
 #include "metamod_oslink.h"
@@ -45,10 +46,10 @@ Menus::Menus() :
 	m_ClientCommandKeyValues(&IServerGameClients::ClientCommandKeyValues, this, &Menus::OnClientCommandKeyValues, nullptr),
 	m_FireEvent(&IGameEventManager2::FireEvent, this, &Menus::OnFireEvent, &Menus::OnFireEventPost),
 	m_OnTakeDamageAlive(static_cast<std::uint32_t>(-1), this, &Menus::Hook_OnTakeDamage_Alive, nullptr),
-	m_ServerSideClientConnect(static_cast<std::uint32_t>(KHook::GetVtableIndex(&CServerSideClientBase::Connect)), this, nullptr, &Menus::OnServerSideClientClientConnect),
-	m_PerformDisconnection(static_cast<std::uint32_t>(KHook::GetVtableIndex(&CServerSideClientBase::PerformDisconnection)), this, &Menus::OnCServerSideClientlientPerformDisconnection, nullptr),
-	m_ProcessTick(static_cast<std::uint32_t>(KHook::GetVtableIndex(&CServerSideClientBase::ProcessTick)), this, &Menus::OnProcessTick, nullptr),
-	m_ProcessStringCmd(static_cast<std::uint32_t>(KHook::GetVtableIndex(&CServerSideClientBase::ProcessStringCmd)), this, &Menus::OnProcessStringCmd, nullptr),
+	m_ServerSideClientConnect(&CServerSideClientBase::Connect, this, nullptr, &Menus::OnServerSideClientClientConnect),
+	m_PerformDisconnection(&CServerSideClientBase::PerformDisconnection, this, &Menus::OnClientDisconnection, nullptr),
+	m_ProcessTick(&CServerSideClientBase::ProcessTick, this, &Menus::OnProcessTick, nullptr),
+	m_ProcessStringCmd(&CServerSideClientBase::ProcessStringCmd, this, &Menus::OnProcessStringCmd, nullptr),
 	m_BuildGameSessionManifest(&IGameSystem::OnBuildGameSessionManifest, this, nullptr, &Menus::OnBuildGameSessionManifest)
 {
 }
@@ -278,6 +279,11 @@ std::string Colorizer(std::string str)
 
 void* Menus::OnMetamodQuery(const char* iface, int* ret)
 {
+	if (!strcmp(iface, MENU_OWNER_INTERFACE))
+	{
+		*ret = META_IFACE_OK;
+		return static_cast<IMenuOwnerApi*>(static_cast<MenusApi*>(g_pMenusCore));
+	}
 	if (!strcmp(iface, MENUS_INTERFACE))
 	{
 		*ret = META_IFACE_OK;
@@ -323,7 +329,7 @@ int CheckActionMenu(int iSlot, CCSPlayerController* pController, int iButton)
 					g_pUtilsCore->PrintToChat(iSlot, " \x08-\x01");
 				}
 			}
-			if(hMenu.hFunc) hMenu.hFunc("exit", "exit", 9, iSlot);
+			if(hMenu.hFunc) InvokeMenu(hMenu.hFunc, "exit", "exit", 9, iSlot);
 			hMenuPlayer.hMenu.clear();
 			g_iForcedMenuType[iSlot] = -1;
 		}
@@ -335,7 +341,7 @@ int CheckActionMenu(int iSlot, CCSPlayerController* pController, int iButton)
 			{
 				hMenuPlayer.iList++;
 				g_pMenusCore->DisplayPlayerMenu(hMenu, iSlot, false, true);
-				if(hMenu.hFunc) hMenu.hFunc("next", "next", 8, iSlot);
+				if(hMenu.hFunc) InvokeMenu(hMenu.hFunc, "next", "next", 8, iSlot);
 			}
 		}
 		else if(iButton == 7)
@@ -347,7 +353,7 @@ int CheckActionMenu(int iSlot, CCSPlayerController* pController, int iButton)
 					hMenuPlayer.iList--;
 					g_pMenusCore->DisplayPlayerMenu(hMenu, iSlot, false, true);
 				}
-				else if(hMenu.hFunc) hMenu.hFunc("back", "back", 7, iSlot);
+				else if(hMenu.hFunc) InvokeMenu(hMenu.hFunc, "back", "back", 7, iSlot);
 			}
 		}
 		else
@@ -357,7 +363,7 @@ int CheckActionMenu(int iSlot, CCSPlayerController* pController, int iButton)
 			if(iItems <= iItem) return 1;
 			if(hMenu.hItems.size() <= iItem) return 1;
 			if(hMenu.hItems[iItem].iType != 1) return 1;
-			if(hMenu.hFunc) hMenu.hFunc(hMenu.hItems[iItem].sBack.c_str(), hMenu.hItems[iItem].sText.c_str(), iButton, iSlot);
+			if(hMenu.hFunc) InvokeMenu(hMenu.hFunc, hMenu.hItems[iItem].sBack.c_str(), hMenu.hItems[iItem].sText.c_str(), iButton, iSlot);
 		}
 		return 1;
 	}
@@ -582,7 +588,7 @@ KHook::Return<void> Menus::OnCheckTransmit(ISource2GameEntities*, CCheckTransmit
 	for (int i = 0; i < nInfoCount; i++)
 	{
 		auto &pInfo = pInfoInfoList[i];
-		int iPlayerSlot = reinterpret_cast<CCheckTransmitInfoHack*>(pInfo)->m_nPlayerSlot;
+		int iPlayerSlot = pInfo->m_nPlayerSlot.Get();
 
 		CCSPlayerController* pSelfController = CCSPlayerController::FromSlot(iPlayerSlot);
 		if (!pSelfController) continue;
@@ -1062,10 +1068,10 @@ bool Menus::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool la
 	g_pServerSideClientVTable = libengine.GetVirtualTableByName("CServerSideClient");
 	if (g_pServerSideClientVTable)
 	{
-		m_ServerSideClientConnect.AddGlobal(reinterpret_cast<CServerSideClient*>(&g_pServerSideClientVTable));
-		m_PerformDisconnection.AddGlobal(reinterpret_cast<CServerSideClient*>(&g_pServerSideClientVTable));
-		m_ProcessTick.AddGlobal(reinterpret_cast<CServerSideClient*>(&g_pServerSideClientVTable));
-		m_ProcessStringCmd.AddGlobal(reinterpret_cast<CServerSideClient*>(&g_pServerSideClientVTable));
+		m_ServerSideClientConnect.AddGlobal(reinterpret_cast<CServerSideClientBase*>(&g_pServerSideClientVTable));
+		m_PerformDisconnection.AddGlobal(reinterpret_cast<CServerSideClientBase*>(&g_pServerSideClientVTable));
+		m_ProcessTick.AddGlobal(reinterpret_cast<CServerSideClientBase*>(&g_pServerSideClientVTable));
+		m_ProcessStringCmd.AddGlobal(reinterpret_cast<CServerSideClientBase*>(&g_pServerSideClientVTable));
 	}
 
 	g_pEntityDebugGameSystemVTable = libserver.GetVirtualTableByName("CEntityDebugGameSystem");
@@ -1231,7 +1237,7 @@ KHook::Return<bool> Menus::Hook_OnTakeDamage_Alive(CCSPlayerPawn* pPawn, CTakeDa
 	return { KHook::Action::Ignore, true };
 }
 
-KHook::Return<void> Menus::OnServerSideClientClientConnect(CServerSideClient* pClient, int socket, const char* pszName, CPlayerUserId nUserID, INetChannel* pNetChannel, uint8 nConnectionTypeFlags, uint32 uChallengeNumber)
+KHook::Return<void> Menus::OnServerSideClientClientConnect(CServerSideClientBase* pClient, int socket, const char* pszName, CPlayerUserId nUserID, INetChannel* pNetChannel, uint8 nConnectionTypeFlags, uint32 uChallengeNumber)
 {
 	if(!pClient) return { KHook::Action::Ignore };
 	int iSlot = pClient->GetPlayerSlot().Get();
@@ -1240,7 +1246,7 @@ KHook::Return<void> Menus::OnServerSideClientClientConnect(CServerSideClient* pC
 	return { KHook::Action::Ignore };
 }
 
-KHook::Return<void> Menus::OnCServerSideClientlientPerformDisconnection(CServerSideClient* pClient, ENetworkDisconnectionReason reason)
+KHook::Return<void> Menus::OnClientDisconnection(CServerSideClientBase* pClient, ENetworkDisconnectionReason reason)
 {
 	if(!pClient) return { KHook::Action::Ignore };
 	int iSlot = pClient->GetPlayerSlot().Get();
@@ -1249,26 +1255,48 @@ KHook::Return<void> Menus::OnCServerSideClientlientPerformDisconnection(CServerS
 	return { KHook::Action::Ignore };
 }
 
-KHook::Return<bool> Menus::OnProcessTick(CServerSideClient* pClient, const CNETMsg_Tick_t& msg)
+KHook::Return<bool> Menus::OnProcessTick(CServerSideClientBase* pClient, const CNetMessagePB<CNETMsg_Tick>& msg)
 {
 	if(!pClient) return { KHook::Action::Ignore, true };
 	int iSlot = pClient->GetPlayerSlot().Get();
-	if(iSlot >= 0 && iSlot < 64 && !g_pPlayersApi->ProcessTick(iSlot, msg))
+	if(iSlot >= 0 && iSlot < 64 && !g_pPlayersApi->ProcessTick(iSlot, static_cast<const CNETMsg_Tick_t&>(msg)))
 		return { KHook::Action::Supersede, false };
 	return { KHook::Action::Ignore, true };
 }
 
-KHook::Return<bool> Menus::OnProcessStringCmd(CServerSideClient* pClient, const CNETMsg_StringCmd_t& msg)
+KHook::Return<bool> Menus::OnProcessStringCmd(CServerSideClientBase* pClient, const CNetMessagePB<CNETMsg_StringCmd>& msg)
 {
 	if(!pClient) return { KHook::Action::Ignore, true };
 	int iSlot = pClient->GetPlayerSlot().Get();
-	if(iSlot >= 0 && iSlot < 64 && !g_pPlayersApi->ProcessStringCmd(iSlot, msg))
+	if(iSlot >= 0 && iSlot < 64 && !g_pPlayersApi->ProcessStringCmd(iSlot, static_cast<const CNETMsg_StringCmd_t&>(msg)))
 		return { KHook::Action::Supersede, false };
 	return { KHook::Action::Ignore, true };
+}
+
+static bool RemoveHook(funchook_t*& hook)
+{
+	if (!hook)
+		return true;
+
+	int result = funchook_uninstall(hook, 0);
+	if (result != FUNCHOOK_ERROR_SUCCESS && result != FUNCHOOK_ERROR_NOT_INSTALLED)
+		return false;
+	if (funchook_destroy(hook) != FUNCHOOK_ERROR_SUCCESS)
+		return false;
+
+	hook = nullptr;
+	return true;
 }
 
 bool Menus::Unload(char *error, size_t maxlen)
 {
+	if (!RemoveHook(m_SayHook) || !RemoveHook(m_SayTeamHook) || !RemoveHook(m_TakeDamageHook) ||
+		!RemoveHook(m_IsHearingClientHook) || !RemoveHook(m_CanAcquireHook) || !RemoveHook(m_ProcessUsercmdsHook))
+	{
+		g_SMAPI->Format(error, maxlen, "Failed to remove an engine hook");
+		return false;
+	}
+
 	m_DispatchConCommand.Remove(g_pCVar);
 	m_GameFrame.Remove(g_pSource2Server);
 	m_GameFramePost.Remove(g_pSource2Server);
@@ -1300,18 +1328,12 @@ bool Menus::Unload(char *error, size_t maxlen)
 	if(g_pCCSPlayerPawnVTable) m_OnTakeDamageAlive.RemoveGlobal(reinterpret_cast<CCSPlayerPawn*>(&g_pCCSPlayerPawnVTable));
 	if(g_pServerSideClientVTable)
 	{
-		m_ServerSideClientConnect.RemoveGlobal(reinterpret_cast<CServerSideClient*>(&g_pServerSideClientVTable));
-		m_PerformDisconnection.RemoveGlobal(reinterpret_cast<CServerSideClient*>(&g_pServerSideClientVTable));
-		m_ProcessTick.RemoveGlobal(reinterpret_cast<CServerSideClient*>(&g_pServerSideClientVTable));
-		m_ProcessStringCmd.RemoveGlobal(reinterpret_cast<CServerSideClient*>(&g_pServerSideClientVTable));
+		m_ServerSideClientConnect.RemoveGlobal(reinterpret_cast<CServerSideClientBase*>(&g_pServerSideClientVTable));
+		m_PerformDisconnection.RemoveGlobal(reinterpret_cast<CServerSideClientBase*>(&g_pServerSideClientVTable));
+		m_ProcessTick.RemoveGlobal(reinterpret_cast<CServerSideClientBase*>(&g_pServerSideClientVTable));
+		m_ProcessStringCmd.RemoveGlobal(reinterpret_cast<CServerSideClientBase*>(&g_pServerSideClientVTable));
 	}
 	if(g_pEntityDebugGameSystemVTable) m_BuildGameSessionManifest.RemoveGlobal(reinterpret_cast<IGameSystem*>(&g_pEntityDebugGameSystemVTable));
-	if(m_SayHook) funchook_destroy(m_SayHook);
-	if(m_SayTeamHook) funchook_destroy(m_SayTeamHook);
-	if(m_TakeDamageHook) funchook_destroy(m_TakeDamageHook);
-	if(m_CanAcquireHook) funchook_destroy(m_CanAcquireHook);
-	if(m_ProcessUsercmdsHook) { funchook_uninstall(m_ProcessUsercmdsHook, 0); funchook_destroy(m_ProcessUsercmdsHook); }
-
 	ConVar_Unregister();
 	
 	return true;
@@ -1366,7 +1388,7 @@ KHook::Return<void> Menus::OnServerConVarChanged(IServerGameDLL*, const char *pV
 	return { KHook::Action::Ignore };
 }
 
-KHook::Return<void> Menus::OnPostEventAbstract(IGameEventSystem*, CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64 *clients, INetworkMessageInternal *pEvent, const CNetMessage *pData, unsigned long nSize, NetChannelBufType_t bufType)
+KHook::Return<void> Menus::OnPostEventAbstract(IGameEventSystem*, CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64 *clients, NetMessageInfo_t *pEvent, const CNetMessage *pData, unsigned long nSize, NetChannelBufType_t bufType)
 {
 	g_pUtilsApi->SendServerPostEvent(nClientCount, clients, pEvent, pData);
 	return { KHook::Action::Ignore };
@@ -1434,7 +1456,7 @@ KHook::Return<void> Menus::OnServerConVarChangedPost(IServerGameDLL*, const char
 	return { KHook::Action::Ignore };
 }
 
-KHook::Return<void> Menus::OnPostEventAbstractPost(IGameEventSystem*, CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64 *clients, INetworkMessageInternal *pEvent, const CNetMessage *pData, unsigned long nSize, NetChannelBufType_t bufType)
+KHook::Return<void> Menus::OnPostEventAbstractPost(IGameEventSystem*, CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64 *clients, NetMessageInfo_t *pEvent, const CNetMessage *pData, unsigned long nSize, NetChannelBufType_t bufType)
 {
 	g_pUtilsApi->SendServerPostEventPost(nClientCount, clients, pEvent, pData);
 	return { KHook::Action::Ignore };
@@ -1478,7 +1500,7 @@ KHook::Return<bool> Menus::OnClientConnect(IServerGameClients*, CPlayerSlot slot
 	return { KHook::Action::Ignore, true };
 }
 
-KHook::Return<void> Menus::OnClientPutInServer(IServerGameClients*, CPlayerSlot slot, char const *pszName, int type, uint64 xuid )
+KHook::Return<void> Menus::OnClientPutInServer(IServerGameClients*, CPlayerSlot slot, char const *pszName, ClientPutInServerType_t type, uint64 xuid )
 {
 	m_Players[slot.Get()]->SetInGame(true);
 
@@ -1865,7 +1887,7 @@ const char* Menus::GetLicense()
 
 const char* Menus::GetVersion()
 {
-	return "1.9.2";
+	return "2.0.0";
 }
 
 const char* Menus::GetDate()

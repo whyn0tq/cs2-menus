@@ -191,7 +191,9 @@ int PlayersApi::FindPlayer(const char* szName)
 
 void PlayersApi::SetConVars(std::vector<int> vPlayers, std::vector<FakeConVar> cvars)
 {
-	static INetworkMessageInternal* netmsg = g_pNetworkMessages->FindNetworkMessagePartial("CNETMsg_SetConVar");
+	NetMessageInfo_t* netmsg = g_pNetworkMessages->FindNetworkMessagePartial("CNETMsg_SetConVar");
+	if (!netmsg)
+	    return;
 	std::unique_ptr<CNetMessagePB<CNETMsg_SetConVar>> msg(netmsg->AllocateMessage()->ToPB<CNETMsg_SetConVar>());
 	
 	for (const auto& cvar : cvars) {
@@ -212,7 +214,9 @@ void PlayersApi::SetConVars(std::vector<int> vPlayers, std::vector<FakeConVar> c
 
 void PlayersApi::SetConVar(std::vector<int> vPlayers, const char* name, const char* value)
 {
-	static INetworkMessageInternal* netmsg = g_pNetworkMessages->FindNetworkMessagePartial("CNETMsg_SetConVar");
+	NetMessageInfo_t* netmsg = g_pNetworkMessages->FindNetworkMessagePartial("CNETMsg_SetConVar");
+	if (!netmsg)
+	    return;
 	std::unique_ptr<CNetMessagePB<CNETMsg_SetConVar>> msg(netmsg->AllocateMessage()->ToPB<CNETMsg_SetConVar>());
 	
 	CMsg_CVars_CVar *cvar = msg->mutable_convars()->add_cvars();
